@@ -62,7 +62,31 @@ io.on("connection", (socket) => {
     state.winner = player;
     io.emit("stateUpdate", state);
   });
+
+  // Reset Timer
+  socket.on("resetTimer", () => {
+  state.timer = 0;
+  io.emit("stateUpdate", state);
+  });
+
+  // Reset Score
+  socket.on("resetScores", () => {
+  state.player1 = 0;
+  state.player2 = 0;
+  io.emit("stateUpdate", state);
+  });
+
+  // Subtract Points
+  socket.on("subtractPoint", (player) => {
+  if (player === "player1" && state.player1 > 0) state.player1--;
+  if (player === "player2" && state.player2 > 0) state.player2--;
+  io.emit("stateUpdate", state);
 });
+
+  
+});
+
+
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => console.log(`Server is running on port ${PORT}`));
