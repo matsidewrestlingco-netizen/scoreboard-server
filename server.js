@@ -1,62 +1,73 @@
-// server.js
+// server.js (multi-mat version)
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" },
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
-// ------------------- STATE -------------------
+function createMatState() {
+  return {
+    player1: 0,
+    player2: 0,
+
+    redName: "RED WRESTLER",
+    greenName: "GREEN WRESTLER",
+
+    period: 1,
+    periodLength: 120,   // seconds
+    timeRemaining: 120,
+    isRunning: false,
+    autoAdvance: true
+  };
+}
+
 let state = {
-  player1: 0,
-  player2: 0,
-
-  mat: 1,
-  period: 1,
-
-  redName: "RED WRESTLER",
-  greenName: "GREEN WRESTLER",
-
-  periodLength: 120, // default: 2 minutes
-  timeRemaining: 120,
-  isRunning: false,
-  autoAdvance: true
+  mats: {
+    1: createMatState(),
+    2: createMatState(),
+    3: createMatState(),
+    4: createMatState()
+  }
 };
 
-let timerInterval = null;
+let timers = {
+  1: null,
+  2: null,
+  3: null,
+  4: null
+};
 
-// ------------------- TEST ROUTE -------------------
+// Express Route
 app.get("/", (req, res) => {
-  res.send("Scoreboard server running.");
+  res.send("Multi-mat Matside Server Running");
 });
 
-// ------------------- SOCKET EVENTS -------------------
-io.on("connection", (socket) => {
+// Socket events
+io.on("connection", socket => {
   socket.emit("stateUpdate", state);
 
-  // Start period countdown
-  socket.on("startPeriod", () => {
-    if (state.isRunning) return;
-    state.isRunning = true;
+  // Start timer
+  socket.on("startPeriod", ({ mat }) => {
+    const m = state.mats[mat];
+    if (!m || m.isRunning) return;
 
-    timerInterval = setInterval(() => {
-      state.timeRemaining--;
+    m.isRunning = true;
 
-      if (state.timeRemaining <= 0) {
-        state.timeRemaining = 0;
-        state.isRunning = false;
-        clearInterval(timerInterval);
+    timers[mat] = setInterval(() => {
+      m.timeRemaining--;
 
-        // buzzer event
-        io.emit("buzzer");
+      if (m.timeRemaining <= 0) {
+        m.timeRemaining = 0;
+        m.isRunning = false;
+        clearInterval(timers[mat]);
 
-        // auto-advance period
-        if (state.autoAdvance) {
-          state.period++;
-          state.timeRemaining = state.periodLength;
+        io.emit("buzzer", { mat });
+
+        if (m.autoAdvance) {
+          m.period++;
+          m.timeRemaining = m.periodLength;
         }
       }
 
@@ -64,61 +75,79 @@ io.on("connection", (socket) => {
     }, 1000);
   });
 
-  socket.on("stopTimer", () => {
-    state.isRunning = false;
-    clearInterval(timerInterval);
+  // Stop Timer
+  socket.on("stopTimer", ({ mat }) => {
+    const m = state.mats[mat];
+    if (!m) return;
+
+    m.isRunning = false;
+    clearInterval(timers[mat]);
     io.emit("stateUpdate", state);
   });
 
-  socket.on("resetTimer", () => {
-    state.timeRemaining = state.periodLength;
-    state.isRunning = false;
-    clearInterval(timerInterval);
+  // Reset Timer
+  socket.on("resetTimer", ({ mat }) => {
+    const m = state.mats[mat];
+    if (!m) return;
+
+    m.timeRemaining = m.periodLength;
+    m.isRunning = false;
+    clearInterval(timers[mat]);
+
     io.emit("stateUpdate", state);
   });
 
-  socket.on("setPeriodLength", (seconds) => {
-    state.periodLength = seconds;
-    state.timeRemaining = seconds;
+  // Change period length
+  socket.on("setPeriodLength", ({ mat, seconds }) => {
+    const m = state.mats[mat];
+    m.periodLength = seconds;
+    m.timeRemaining = seconds;
+
     io.emit("stateUpdate", state);
   });
 
-  socket.on("toggleAutoAdvance", (value) => {
-    state.autoAdvance = value;
+  // Toggle auto-advance
+  socket.on("toggleAutoAdvance", ({ mat, value }) => {
+    state.mats[mat].autoAdvance = value;
     io.emit("stateUpdate", state);
   });
 
-  // Scores
-  socket.on("addPoint", (p) => {
-    if (p === "player1") state.player1++;
-    if (p === "player2") state.player2++;
+  // Add scoring
+  socket.on("addPoints", ({ mat, wrestler, points }) => {
+    const m = state.mats[mat];
+    if (wrestler === "red") m.player1 += points;
+    if (wrestler === "green") m.player2 += points;
     io.emit("stateUpdate", state);
   });
 
-  socket.on("subtractPoint", (p) => {
-    if (p === "player1" && state.player1 > 0) state.player1--;
-    if (p === "player2" && state.player2 > 0) state.player2--;
+  // Manual score reset
+  socket.on("resetScores", ({ mat }) => {
+    const m = state.mats[mat];
+    m.player1 = 0;
+    m.player2 = 0;
     io.emit("stateUpdate", state);
   });
 
-  socket.on("resetScores", () => {
-    state.player1 = 0;
-    state.player2 = 0;
+  // Set names
+  socket.on("setNames", ({ mat, red, green }) => {
+    const m = state.mats[mat];
+    m.redName = red;
+    m.greenName = green;
+
     io.emit("stateUpdate", state);
   });
 
-  // Match info
-  socket.on("setMat", (v) => { state.mat = v; io.emit("stateUpdate", state); });
-  socket.on("setPeriod", (v) => { state.period = v; io.emit("stateUpdate", state); });
-  socket.on("setNames", (data) => {
-    state.redName = data.red;
-    state.greenName = data.green;
+  // Set period number manually
+  socket.on("setPeriod", ({ mat, value }) => {
+    state.mats[mat].period = value;
     io.emit("stateUpdate", state);
   });
 
-  // buzzer test
-  socket.on("playBuzzer", () => io.emit("buzzer"));
+  // Buzzer test
+  socket.on("playBuzzer", ({ mat }) => {
+    io.emit("buzzer", { mat });
+  });
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log("Server running on " + PORT));
+server.listen(PORT, () => console.log("Multi-mat server running on " + PORT));
