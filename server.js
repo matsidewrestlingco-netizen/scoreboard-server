@@ -9,7 +9,7 @@ const io = new Server(server, {
   cors: { origin: "*" },
 });
 
-// ------------------- SCOREBOARD STATE -------------------
+// ------------------- STATE -------------------
 let state = {
   player1: 0,
   player2: 0,
@@ -20,13 +20,15 @@ let state = {
   redName: "RED WRESTLER",
   greenName: "GREEN WRESTLER",
 
-  periodLength: 120, // default 2 minutes (120 sec)
+  periodLength: 120, // default: 2 minutes
   timeRemaining: 120,
   isRunning: false,
+  autoAdvance: true
 };
 
 let timerInterval = null;
 
+// ------------------- TEST ROUTE -------------------
 app.get("/", (req, res) => {
   res.send("Scoreboard server running.");
 });
@@ -35,7 +37,7 @@ app.get("/", (req, res) => {
 io.on("connection", (socket) => {
   socket.emit("stateUpdate", state);
 
-  // Start countdown
+  // Start period countdown
   socket.on("startPeriod", () => {
     if (state.isRunning) return;
     state.isRunning = true;
@@ -47,20 +49,27 @@ io.on("connection", (socket) => {
         state.timeRemaining = 0;
         state.isRunning = false;
         clearInterval(timerInterval);
+
+        // buzzer event
+        io.emit("buzzer");
+
+        // auto-advance period
+        if (state.autoAdvance) {
+          state.period++;
+          state.timeRemaining = state.periodLength;
+        }
       }
 
       io.emit("stateUpdate", state);
     }, 1000);
   });
 
-  // Stop timer
   socket.on("stopTimer", () => {
     state.isRunning = false;
     clearInterval(timerInterval);
     io.emit("stateUpdate", state);
   });
 
-  // Reset timer
   socket.on("resetTimer", () => {
     state.timeRemaining = state.periodLength;
     state.isRunning = false;
@@ -68,14 +77,18 @@ io.on("connection", (socket) => {
     io.emit("stateUpdate", state);
   });
 
-  // Set custom period length
   socket.on("setPeriodLength", (seconds) => {
     state.periodLength = seconds;
     state.timeRemaining = seconds;
     io.emit("stateUpdate", state);
   });
 
-  // Score controls
+  socket.on("toggleAutoAdvance", (value) => {
+    state.autoAdvance = value;
+    io.emit("stateUpdate", state);
+  });
+
+  // Scores
   socket.on("addPoint", (p) => {
     if (p === "player1") state.player1++;
     if (p === "player2") state.player2++;
@@ -95,21 +108,16 @@ io.on("connection", (socket) => {
   });
 
   // Match info
-  socket.on("setMat", (v) => {
-    state.mat = v;
-    io.emit("stateUpdate", state);
-  });
-
-  socket.on("setPeriod", (v) => {
-    state.period = v;
-    io.emit("stateUpdate", state);
-  });
-
+  socket.on("setMat", (v) => { state.mat = v; io.emit("stateUpdate", state); });
+  socket.on("setPeriod", (v) => { state.period = v; io.emit("stateUpdate", state); });
   socket.on("setNames", (data) => {
     state.redName = data.red;
     state.greenName = data.green;
     io.emit("stateUpdate", state);
   });
+
+  // buzzer test
+  socket.on("playBuzzer", () => io.emit("buzzer"));
 });
 
 const PORT = process.env.PORT || 3001;
