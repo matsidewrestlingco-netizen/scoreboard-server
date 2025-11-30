@@ -1,0 +1,25 @@
+{
+  "events": [
+    {
+      "id": "BWMN_2025",
+      "name": "Baldwin Whitehall Match Night",
+      "code": "BWMN2024!",
+      "mats": 3,
+      "periodSeconds": 60
+    },
+    {
+      "id": "jv-invitational",
+      "name": "JV Invitational",
+      "code": "JV2024!",
+      "mats": 4,
+      "periodSeconds": 90
+    },
+    {
+      "id": "test-event",
+      "name": "Test Event",
+      "code": "Test123",
+      "mats": 4,
+      "periodSeconds": 60
+    }
+  ]
+}
