@@ -1,3 +1,11 @@
 {
-  "events": []
+  "events": [
+    {
+      "id": "Shaler",
+      "name": "Shaler",
+      "code": "Shaler",
+      "mats": 3,
+      "periodSeconds": 60
+    }
+  ]
 }
