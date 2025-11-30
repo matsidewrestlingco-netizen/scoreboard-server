@@ -1,12 +1,12 @@
 // ============================================================================
 //  Matside Scoreboard Server (GitHub Storage Edition)
+//  Node 18+ Compatible — Uses Built-in fetch()
 // ============================================================================
 
 const express = require("express");
 const http = require("http");
 const socketio = require("socket.io");
 const cors = require("cors");
-const fetch = require("node-fetch"); // Needed for GitHub API
 const path = require("path");
 
 const app = express();
@@ -14,14 +14,13 @@ const server = http.createServer(app);
 
 // Environment Variables (Render)
 const GH_TOKEN = process.env.GH_TOKEN;
-const GH_REPO = process.env.GH_REPO; // e.g. "matsidewrestlingco-netizen/scoreboard-server"
-const GH_FILEPATH = process.env.GH_FILEPATH; // "public/events.json"
+const GH_REPO = process.env.GH_REPO;
+const GH_FILEPATH = process.env.GH_FILEPATH;
 
-// GitHub API endpoints
 const GH_API_BASE = "https://api.github.com";
 
 // ============================================================================
-//  CORS (required for GitHub Pages + matside.org)
+//  CORS
 // ============================================================================
 app.use(cors({
   origin: [
@@ -38,12 +37,12 @@ app.options("*", cors());
 app.use(express.json());
 
 // ============================================================================
-//  SERVE PUBLIC FOLDER
+//  PUBLIC FOLDER
 // ============================================================================
 app.use(express.static(path.join(__dirname, "public")));
 
 // ============================================================================
-//  GET /events.json — Read events.json from GitHub
+//  GET /events.json  (read from GitHub)
 // ============================================================================
 app.get("/events.json", async (req, res) => {
   try {
@@ -74,16 +73,16 @@ app.get("/events.json", async (req, res) => {
 });
 
 // ============================================================================
-//  POST /save-events — Save events.json to GitHub
+//  POST /save-events  (write to GitHub)
 // ============================================================================
 app.post("/save-events", async (req, res) => {
   try {
     const newContent = JSON.stringify(req.body, null, 2);
 
-    // STEP 1 — Get SHA of existing file
-    const getUrl = `${GH_API_BASE}/repos/${GH_REPO}/contents/${GH_FILEPATH}`;
+    // ---- STEP 1: Get current SHA ----
+    const url = `${GH_API_BASE}/repos/${GH_REPO}/contents/${GH_FILEPATH}`;
 
-    const getRes = await fetch(getUrl, {
+    const getRes = await fetch(url, {
       headers: {
         "Authorization": `Bearer ${GH_TOKEN}`,
         "Accept": "application/vnd.github+json"
@@ -91,15 +90,15 @@ app.post("/save-events", async (req, res) => {
     });
 
     if (!getRes.ok) {
-      console.log("[save-events] SHA lookup failed:", await getRes.text());
-      return res.status(500).json({ ok: false, error: "GitHub SHA fetch failed" });
+      console.log("[save-events] SHA fetch failed:", await getRes.text());
+      return res.json({ ok: false, error: "GitHub SHA lookup failed" });
     }
 
-    const data = await getRes.json();
-    const sha = data.sha;
+    const fileData = await getRes.json();
+    const sha = fileData.sha;
 
-    // STEP 2 — Update file
-    const updateRes = await fetch(getUrl, {
+    // ---- STEP 2: Write update ----
+    const putRes = await fetch(url, {
       method: "PUT",
       headers: {
         "Authorization": `Bearer ${GH_TOKEN}`,
@@ -113,9 +112,9 @@ app.post("/save-events", async (req, res) => {
       })
     });
 
-    if (!updateRes.ok) {
-      console.log("[save-events] GitHub write failed:", await updateRes.text());
-      return res.status(500).json({ ok: false, error: "GitHub write failed" });
+    if (!putRes.ok) {
+      console.log("[save-events] GitHub write failed:", await putRes.text());
+      return res.json({ ok: false, error: "GitHub write failed" });
     }
 
     console.log("[save-events] events.json updated successfully!");
@@ -128,7 +127,7 @@ app.post("/save-events", async (req, res) => {
 });
 
 // ============================================================================
-//  SCOREBOARD STATE (unchanged)
+//  SCOREBOARD STATE + SOCKET.IO (unchanged)
 // ============================================================================
 let state = {
   mats: {
@@ -139,12 +138,7 @@ let state = {
   }
 };
 
-// ============================================================================
-//  SOCKET.IO — Real-time score updates
-// ============================================================================
-const io = socketio(server, {
-  cors: { origin: "*" }
-});
+const io = socketio(server, { cors: { origin: "*" } });
 
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
@@ -174,7 +168,7 @@ io.on("connection", (socket) => {
 //  TIMER LOOP
 // ============================================================================
 setInterval(() => {
-  Object.values(state.mats).forEach(m => {
+  Object.values(state.mats).forEach((m) => {
     if (m.running) m.time++;
   });
   io.emit("stateUpdate", state);
