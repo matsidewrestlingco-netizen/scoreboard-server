@@ -1,13 +1,15 @@
 {
   "name": "scoreboard-server",
-  "version": "1.0.0",
-  "description": "Real-time scoreboard backend using Node.js and Socket.IO",
+  "version": "2.10.0",
+  "description": "Matside Scoreboard Server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "node-fetch": "^2.6.7",
     "socket.io": "^4.7.2"
   }
 }
