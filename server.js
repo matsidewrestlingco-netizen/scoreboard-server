@@ -1,183 +1,233 @@
-// ============================================================================
-//  Matside Scoreboard Server (GitHub Storage Edition)
-//  Node 18+ Compatible — Uses Built-in fetch()
-// ============================================================================
-
+// ==============================
+// server.js  (place at repo root)
+// ==============================
 const express = require("express");
 const http = require("http");
-const socketio = require("socket.io");
 const cors = require("cors");
 const path = require("path");
+const { Server } = require("socket.io");
 
+// ---- Basic server setup ----
 const app = express();
 const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
 
-// Environment Variables (Render)
-const GH_TOKEN = process.env.GH_TOKEN;
-const GH_REPO = process.env.GH_REPO;
-const GH_FILEPATH = process.env.GH_FILEPATH;
-
-const GH_API_BASE = "https://api.github.com";
-
-// ============================================================================
-//  CORS
-// ============================================================================
-app.use(cors({
-  origin: [
-    "https://matsidewrestlingco-netizen.github.io",
-    "https://www.matside.org",
-    "http://localhost:3000",
-    "http://localhost:5500"
-  ],
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type"]
-}));
-app.options("*", cors());
-
+app.use(cors());
 app.use(express.json());
 
-// ============================================================================
-//  PUBLIC FOLDER
-// ============================================================================
+// Serve static frontend from /public
 app.use(express.static(path.join(__dirname, "public")));
 
-// ============================================================================
-//  GET /events.json  (read from GitHub)
-// ============================================================================
-app.get("/events.json", async (req, res) => {
-  try {
-    const url = `${GH_API_BASE}/repos/${GH_REPO}/contents/${GH_FILEPATH}`;
+// ---- Scoreboard state ----
+function createMatState() {
+  return {
+    time: 0,       // countdown seconds
+    running: false,
+    red: 0,
+    green: 0,
+    period: 1
+  };
+}
 
-    const ghRes = await fetch(url, {
-      headers: {
-        "Authorization": `Bearer ${GH_TOKEN}`,
-        "Accept": "application/vnd.github+json"
-      }
-    });
-
-    if (!ghRes.ok) {
-      console.log("[GET events.json] GitHub error:", await ghRes.text());
-      return res.status(500).json({ error: "GitHub read failed" });
-    }
-
-    const fileData = await ghRes.json();
-    const content = Buffer.from(fileData.content, "base64").toString("utf8");
-
-    res.setHeader("Content-Type", "application/json");
-    res.send(content);
-
-  } catch (err) {
-    console.error("[GET events.json] Error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// ============================================================================
-//  POST /save-events  (write to GitHub)
-// ============================================================================
-app.post("/save-events", async (req, res) => {
-  try {
-    const newContent = JSON.stringify(req.body, null, 2);
-
-    // ---- STEP 1: Get current SHA ----
-    const url = `${GH_API_BASE}/repos/${GH_REPO}/contents/${GH_FILEPATH}`;
-
-    const getRes = await fetch(url, {
-      headers: {
-        "Authorization": `Bearer ${GH_TOKEN}`,
-        "Accept": "application/vnd.github+json"
-      }
-    });
-
-    if (!getRes.ok) {
-      console.log("[save-events] SHA fetch failed:", await getRes.text());
-      return res.json({ ok: false, error: "GitHub SHA lookup failed" });
-    }
-
-    const fileData = await getRes.json();
-    const sha = fileData.sha;
-
-    // ---- STEP 2: Write update ----
-    const putRes = await fetch(url, {
-      method: "PUT",
-      headers: {
-        "Authorization": `Bearer ${GH_TOKEN}`,
-        "Accept": "application/vnd.github+json",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        message: "Updated events.json via Matside Admin",
-        content: Buffer.from(newContent).toString("base64"),
-        sha: sha
-      })
-    });
-
-    if (!putRes.ok) {
-      console.log("[save-events] GitHub write failed:", await putRes.text());
-      return res.json({ ok: false, error: "GitHub write failed" });
-    }
-
-    console.log("[save-events] events.json updated successfully!");
-    res.json({ ok: true });
-
-  } catch (err) {
-    console.error("[save-events] Error:", err);
-    res.status(500).json({ ok: false, error: err.toString() });
-  }
-});
-
-// ============================================================================
-//  SCOREBOARD STATE + SOCKET.IO (unchanged)
-// ============================================================================
-let state = {
+const state = {
   mats: {
-    1: { time: 0, running: false, red: 0, green: 0, period: 1, winner: null },
-    2: { time: 0, running: false, red: 0, green: 0, period: 1, winner: null },
-    3: { time: 0, running: false, red: 0, green: 0, period: 1, winner: null },
-    4: { time: 0, running: false, red: 0, green: 0, period: 1, winner: null }
+    1: createMatState(),
+    2: createMatState(),
+    3: createMatState(),
+    4: createMatState()
   }
 };
 
-const io = socketio(server, { cors: { origin: "*" } });
+// ---- Countdown timer tick ----
+// Decrements time for running mats once per second.
+setInterval(() => {
+  let changed = false;
 
+  Object.keys(state.mats).forEach((matKey) => {
+    const m = state.mats[matKey];
+    if (m.running && m.time > 0) {
+      m.time -= 1;
+      changed = true;
+
+      // Stop at zero (no auto-advance here; panel will handle extra logic if needed)
+      if (m.time <= 0) {
+        m.time = 0;
+        m.running = false;
+      }
+    }
+  });
+
+  if (changed) {
+    io.emit("stateUpdate", state);
+  }
+}, 1000);
+
+// ---- Socket.IO handlers ----
 io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
+  // Send current state to new client
   socket.emit("stateUpdate", state);
 
   socket.on("updateState", ({ mat, updates }) => {
-    Object.assign(state.mats[mat], updates);
+    const m = state.mats[mat];
+    if (!m || !updates || typeof updates !== "object") return;
+
+    const u = { ...updates };
+
+    // Period delta support (from control panel)
+    if (typeof u.periodChange === "number") {
+      const delta = u.periodChange;
+      delete u.periodChange;
+      m.period = Math.max(1, (m.period || 1) + delta);
+    }
+
+    // Merge remaining updates directly
+    Object.assign(m, u);
     io.emit("stateUpdate", state);
   });
 
   socket.on("addPoints", ({ mat, color, pts }) => {
-    state.mats[mat][color] += pts;
+    const m = state.mats[mat];
+    if (!m || !color || typeof pts !== "number") return;
+
+    if (color === "red") {
+      m.red = Math.max(0, m.red + pts);
+    } else if (color === "green") {
+      m.green = Math.max(0, m.green + pts);
+    }
     io.emit("stateUpdate", state);
   });
 
   socket.on("subPoint", ({ mat, color }) => {
-    state.mats[mat][color] = Math.max(0, state.mats[mat][color] - 1);
+    const m = state.mats[mat];
+    if (!m || !color) return;
+
+    if (color === "red") {
+      m.red = Math.max(0, m.red - 1);
+    } else if (color === "green") {
+      m.green = Math.max(0, m.green - 1);
+    }
     io.emit("stateUpdate", state);
   });
-
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
-  });
 });
 
-// ============================================================================
-//  TIMER LOOP
-// ============================================================================
-setInterval(() => {
-  Object.values(state.mats).forEach((m) => {
-    if (m.running) m.time++;
-  });
-  io.emit("stateUpdate", state);
-}, 1000);
+// ---- GitHub-backed events.json support ----
+// Uses environment variables:
+//   GITHUB_TOKEN
+//   GITHUB_REPO        e.g. "matsidewrestlingco-netizen/scoreboard-server"
+//   GITHUB_FILE_PATH   e.g. "public/events.json"
+//   GITHUB_BRANCH      e.g. "main"
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO || "matsidewrestlingco-netizen/scoreboard-server";
+const GITHUB_FILE_PATH = process.env.GITHUB_FILE_PATH || "public/events.json";
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 
-// ============================================================================
-//  START SERVER
-// ============================================================================
-const PORT = process.env.PORT || 3000;
+async function githubFetchJSON() {
+  if (!GITHUB_TOKEN) {
+    throw new Error("GITHUB_TOKEN not set");
+  }
+
+  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${encodeURIComponent(
+    GITHUB_FILE_PATH
+  )}?ref=${encodeURIComponent(GITHUB_BRANCH)}`;
+
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "User-Agent": "matside-scoreboard"
+    }
+  });
+
+  if (!res.ok) {
+    throw new Error(`GitHub read failed: ${res.status} ${res.statusText}`);
+  }
+
+  const json = await res.json();
+  const decoded = Buffer.from(json.content, "base64").toString("utf8");
+  return { json: JSON.parse(decoded), sha: json.sha };
+}
+
+async function githubWriteJSON(contentObj, sha) {
+  if (!GITHUB_TOKEN) {
+    throw new Error("GITHUB_TOKEN not set");
+  }
+
+  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${encodeURIComponent(
+    GITHUB_FILE_PATH
+  )}`;
+
+  const body = {
+    message: "Update events.json from Matside admin UI",
+    content: Buffer.from(JSON.stringify(contentObj, null, 2), "utf8").toString("base64"),
+    sha,
+    branch: GITHUB_BRANCH
+  };
+
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "User-Agent": "matside-scoreboard"
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    throw new Error(`GitHub write failed: ${res.status} ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+// GET /events.json -> proxy from GitHub
+app.get("/events.json", async (req, res) => {
+  try {
+    const { json } = await githubFetchJSON();
+    res.json(json);
+  } catch (err) {
+    console.error("[Events] GitHub read error:", err.message);
+    res.status(500).json({ error: "GitHub read failed" });
+  }
+});
+
+// POST /save-events -> body: { events: [...] }
+app.post("/save-events", async (req, res) => {
+  try {
+    const events = req.body?.events;
+    if (!Array.isArray(events)) {
+      return res.status(400).json({ error: "Invalid events payload" });
+    }
+
+    const { json: current, sha } = await githubFetchJSON();
+    const updated = { ...current, events };
+
+    await githubWriteJSON(updated, sha);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[Events] GitHub write error:", err.message);
+    res.status(500).json({ error: "GitHub write failed" });
+  }
+});
+
+// Root route
+app.get("/", (req, res) => {
+  res.send("Matside Scoreboard server is running.");
+});
+
+// ---- Start server ----
+const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`Matside server running on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
+
+
+
+/* ==========================================
+   public/control.html  (place in /public)
+   ========================================== */
