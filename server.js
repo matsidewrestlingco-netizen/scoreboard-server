@@ -1,53 +1,63 @@
 /**
- * Matside Scoreboard Server v2.10
- * - Multi-mat state
- * - Timer ticking
- * - Events saving (GitHub push)
- * - NEW: Match Results logging (GitHub push)
+ * Matside Scoreboard Server v2.11 (Improved Edition)
+ * --------------------------------------------------
+ * - No node-fetch required (uses built-in fetch)
+ * - Improved GitHub push handling
+ * - Improved GitHub load handling
+ * - Event + Match Results JSON stored in GitHub repo
+ * - Multi-mat scoreboard sync
+ * - Socket.io real-time updates
  */
 
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
-const fetch = require("node-fetch");
 
 require("dotenv").config();
 
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: "2mb" }));
-
-// --------------------------------------------------------------
-// GitHub API Config
-// --------------------------------------------------------------
+// -----------------------------------------------------
+// GitHub Repo Settings
+// -----------------------------------------------------
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO = "matsidewrestlingco-netizen/scoreboard-server";
-const EVENTS_PATH = "public/events.json";
-const MATCH_RESULTS_PATH = "public/match-results.json";
 const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_REPO}/contents/`;
 
-/** Push a JSON file to GitHub */
+const EVENTS_PATH = "public/events.json";
+const RESULTS_PATH = "public/match-results.json";
+
+// -----------------------------------------------------
+// Express Setup
+// -----------------------------------------------------
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "3mb" }));
+
+// -----------------------------------------------------
+// Helper: Push a JSON file to GitHub
+// -----------------------------------------------------
 async function pushToGitHub(path, jsonData, commitMsg) {
   try {
-    // 1. Get current file SHA
+    // Step 1 — check if file exists
     let sha = null;
-    const metaRes = await fetch(GITHUB_API_URL + path, {
+
+    const meta = await fetch(GITHUB_API_URL + path, {
       headers: {
         Authorization: `Bearer ${GITHUB_TOKEN}`,
         Accept: "application/vnd.github+json"
       }
     });
 
-    if (metaRes.status === 200) {
-      const meta = await metaRes.json();
-      sha = meta.sha;
+    if (meta.ok) {
+      const info = await meta.json();
+      sha = info.sha;
     }
 
-    const base64Content = Buffer.from(JSON.stringify(jsonData, null, 2)).toString("base64");
+    const content = Buffer.from(JSON.stringify(jsonData, null, 2))
+      .toString("base64");
 
-    // 2. Push update
-    const updateRes = await fetch(GITHUB_API_URL + path, {
+    // Step 2 — push update
+    const res = await fetch(GITHUB_API_URL + path, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${GITHUB_TOKEN}`,
@@ -55,31 +65,27 @@ async function pushToGitHub(path, jsonData, commitMsg) {
       },
       body: JSON.stringify({
         message: commitMsg,
-        content: base64Content,
+        content,
         sha
       })
     });
 
-    if (!updateRes.ok) {
-      const err = await updateRes.text();
-      console.error("[GitHub Push ERROR]", err);
+    if (!res.ok) {
+      const txt = await res.text();
+      console.error("[GitHub Push Failed]\n", txt);
       return false;
     }
 
     return true;
-  } catch (e) {
-    console.error("[GitHub Push Exception]", e);
+  } catch (err) {
+    console.error("[GitHub Push Exception]", err);
     return false;
   }
 }
 
-// --------------------------------------------------------------
-// Default Data Files
-// --------------------------------------------------------------
-let eventsData = [];
-let matchResults = [];
-
-// load from GitHub at startup
+// -----------------------------------------------------
+// Helper: Load a File From GitHub
+// -----------------------------------------------------
 async function loadFromGitHub(path) {
   try {
     const res = await fetch(GITHUB_API_URL + path, {
@@ -91,27 +97,34 @@ async function loadFromGitHub(path) {
 
     if (!res.ok) return null;
 
-    const data = await res.json();
-    const decoded = JSON.parse(Buffer.from(data.content, "base64").toString("utf8"));
-    return decoded;
+    const file = await res.json();
+    return JSON.parse(Buffer.from(file.content, "base64").toString("utf8"));
   } catch (err) {
-    console.error("[GitHub load error]", err);
+    console.error("[GitHub Load Error]", err);
     return null;
   }
 }
 
-// load events + results on startup:
+// -----------------------------------------------------
+// Load Data (Events + Match Results) on Boot
+// -----------------------------------------------------
+let eventsData = [];
+let matchResults = [];
+
 (async () => {
   const e = await loadFromGitHub(EVENTS_PATH);
   if (e) eventsData = e;
 
-  const r = await loadFromGitHub(MATCH_RESULTS_PATH);
-  if (r) matchResults = r;
+  const m = await loadFromGitHub(RESULTS_PATH);
+  if (m) matchResults = m;
+
+  console.log("[Startup] Loaded events:", eventsData.length);
+  console.log("[Startup] Loaded match results:", matchResults.length);
 })();
 
-// --------------------------------------------------------------
+// -----------------------------------------------------
 // REST API Routes
-// --------------------------------------------------------------
+// -----------------------------------------------------
 app.get("/events.json", (req, res) => {
   res.json(eventsData);
 });
@@ -120,31 +133,29 @@ app.post("/save-events", async (req, res) => {
   eventsData = req.body.events || [];
 
   const ok = await pushToGitHub(EVENTS_PATH, eventsData, "Update events.json");
-  if (!ok) return res.json({ error: "GitHub write failed" });
-
-  res.json({ success: true });
+  return res.json(ok ? { success: true } : { error: "GitHub write failed" });
 });
 
-// NEW: return match history
 app.get("/match-results", (req, res) => {
   res.json(matchResults);
 });
 
-// NEW: save match results
 app.post("/save-match-result", async (req, res) => {
   const entry = req.body;
-
   matchResults.push(entry);
 
-  const ok = await pushToGitHub(MATCH_RESULTS_PATH, matchResults, "Add match result");
-  if (!ok) return res.json({ error: "GitHub write failed" });
+  const ok = await pushToGitHub(
+    RESULTS_PATH,
+    matchResults,
+    "Add match result"
+  );
 
-  res.json({ success: true });
+  return res.json(ok ? { success: true } : { error: "GitHub write failed" });
 });
 
-// --------------------------------------------------------------
-// MULTI-MAT SCOREBOARD STATE
-// --------------------------------------------------------------
+// -----------------------------------------------------
+// Multi-Mat Scoreboard State
+// -----------------------------------------------------
 const mats = {
   1: { period: 1, time: 60, running: false, red: 0, green: 0 },
   2: { period: 1, time: 60, running: false, red: 0, green: 0 },
@@ -152,70 +163,65 @@ const mats = {
   4: { period: 1, time: 60, running: false, red: 0, green: 0 }
 };
 
-// --------------------------------------------------------------
-// SERVER + SOCKET
-// --------------------------------------------------------------
+// -----------------------------------------------------
+// Timer Loop — Updates Every 1 Second
+// -----------------------------------------------------
+function tickTimers() {
+  for (const mat of [1, 2, 3, 4]) {
+    const m = mats[mat];
+
+    if (m.running && m.time > 0) {
+      m.time -= 1;
+
+      if (m.time <= 0) {
+        m.time = 0;
+        m.running = false;
+      }
+    }
+  }
+  io.emit("stateUpdate", { mats });
+}
+
+setInterval(tickTimers, 1000);
+
+// -----------------------------------------------------
+// Socket.io Setup
+// -----------------------------------------------------
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*" }
 });
 
-// Broadcast full state
-function emitState() {
-  io.emit("stateUpdate", { mats });
-}
-
-// Update timers every 1s
-setInterval(() => {
-  for (let mat of [1,2,3,4]) {
-    const m = mats[mat];
-    if (m.running && m.time > 0) {
-      m.time--;
-      if (m.time === 0) {
-        m.running = false;
-      }
-    }
-  }
-  emitState();
-}, 1000);
-
-// --------------------------------------------------------------
-// SOCKET HANDLING
-// --------------------------------------------------------------
 io.on("connection", socket => {
-
   socket.emit("stateUpdate", { mats });
 
   socket.on("updateState", ({ mat, updates }) => {
     Object.assign(mats[mat], updates);
-    emitState();
+    io.emit("stateUpdate", { mats });
   });
 
   socket.on("addPoints", ({ mat, color, pts }) => {
     mats[mat][color] += pts;
-    emitState();
+    io.emit("stateUpdate", { mats });
   });
 
   socket.on("subPoint", ({ mat, color }) => {
     mats[mat][color] = Math.max(0, mats[mat][color] - 1);
-    emitState();
+    io.emit("stateUpdate", { mats });
   });
 
-  // NEW: match-ended event
   socket.on("matchEnded", async (data) => {
     console.log("[Match Ended]", data);
 
     matchResults.push(data);
+    await pushToGitHub(RESULTS_PATH, matchResults, "Add match result");
 
-    await pushToGitHub(MATCH_RESULTS_PATH, matchResults, "Add match result");
-
-    emitState();
+    io.emit("stateUpdate", { mats });
   });
-
 });
 
-// --------------------------------------------------------------
+// -----------------------------------------------------
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log("Server running on", PORT);
+  console.log("Matside Server running on port", PORT);
 });
