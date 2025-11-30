@@ -1,25 +1,27 @@
 // ============================================================================
-//  Matside Scoreboard Server
-//  Updated with:
-//    ✔ Full CORS support (GET/POST + preflight)
-//    ✔ Persistent event storage (/var/data/events.json)
-//    ✔ Safe fallbacks for first-run initialization
-//    ✔ Socket.IO real-time sync
-//    ✔ Clean Express routing
+//  Matside Scoreboard Server (GitHub Storage Edition)
 // ============================================================================
 
 const express = require("express");
 const http = require("http");
 const socketio = require("socket.io");
-const fs = require("fs");
-const path = require("path");
 const cors = require("cors");
+const fetch = require("node-fetch"); // Needed for GitHub API
+const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
 
+// Environment Variables (Render)
+const GH_TOKEN = process.env.GH_TOKEN;
+const GH_REPO = process.env.GH_REPO; // e.g. "matsidewrestlingco-netizen/scoreboard-server"
+const GH_FILEPATH = process.env.GH_FILEPATH; // "public/events.json"
+
+// GitHub API endpoints
+const GH_API_BASE = "https://api.github.com";
+
 // ============================================================================
-//  CORS CONFIG (Fixes your GitHub Pages → Render requests)
+//  CORS (required for GitHub Pages + matside.org)
 // ============================================================================
 app.use(cors({
   origin: [
@@ -31,93 +33,102 @@ app.use(cors({
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"]
 }));
-
-// Preflight support
 app.options("*", cors());
 
-// ============================================================================
-//  SOCKET.IO
-// ============================================================================
-const io = socketio(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
-});
-
-// ============================================================================
-//  PATHS
-// ============================================================================
-const PUBLIC_DIR = path.join(__dirname, "public");
-
-const PERSIST_EVENTS_PATH = "/var/data/events.json";          // Render persistent disk
-const DEFAULT_EVENTS_PATH = path.join(PUBLIC_DIR, "events.json");
-
-// ============================================================================
-//  INITIALIZE EVENTS (first-time setup)
-// ============================================================================
-(function initializeEvents() {
-  try {
-    if (!fs.existsSync(PERSIST_EVENTS_PATH)) {
-      console.log("[Events] No persistent events.json found. Creating one.");
-
-      let defaultEvents = { events: [] };
-
-      // If a default exists in /public, use that
-      if (fs.existsSync(DEFAULT_EVENTS_PATH)) {
-        defaultEvents = JSON.parse(fs.readFileSync(DEFAULT_EVENTS_PATH, "utf8"));
-      }
-
-      fs.writeFileSync(PERSIST_EVENTS_PATH, JSON.stringify(defaultEvents, null, 2));
-
-      console.log("[Events] /var/data/events.json created successfully.");
-    } else {
-      console.log("[Events] Persistent events.json found.");
-    }
-  } catch (err) {
-    console.error("[Events] Initialization error:", err);
-  }
-})();
-
-// ============================================================================
-//  EXPRESS MIDDLEWARE & STATIC FILES
-// ============================================================================
 app.use(express.json());
-app.use(express.static(PUBLIC_DIR));
 
 // ============================================================================
-//  ROUTE: GET /events.json
+//  SERVE PUBLIC FOLDER
 // ============================================================================
-app.get("/events.json", (req, res) => {
-  if (fs.existsSync(PERSIST_EVENTS_PATH)) {
-    return res.sendFile(PERSIST_EVENTS_PATH);
-  }
-  return res.sendFile(DEFAULT_EVENTS_PATH);
-});
+app.use(express.static(path.join(__dirname, "public")));
 
 // ============================================================================
-//  ROUTE: POST /save-events
+//  GET /events.json — Read events.json from GitHub
 // ============================================================================
-app.post("/save-events", (req, res) => {
-  const eventsData = req.body;
+app.get("/events.json", async (req, res) => {
+  try {
+    const url = `${GH_API_BASE}/repos/${GH_REPO}/contents/${GH_FILEPATH}`;
 
-  if (!eventsData || typeof eventsData !== "object") {
-    return res.status(400).json({ ok: false, error: "Invalid events data." });
-  }
+    const ghRes = await fetch(url, {
+      headers: {
+        "Authorization": `Bearer ${GH_TOKEN}`,
+        "Accept": "application/vnd.github+json"
+      }
+    });
 
-  fs.writeFile(PERSIST_EVENTS_PATH, JSON.stringify(eventsData, null, 2), (err) => {
-    if (err) {
-      console.error("[Events] Write error:", err);
-      return res.status(500).json({ ok: false, error: err.toString() });
+    if (!ghRes.ok) {
+      console.log("[GET events.json] GitHub error:", await ghRes.text());
+      return res.status(500).json({ error: "GitHub read failed" });
     }
 
-    console.log("[Events] events.json updated successfully.");
-    res.json({ ok: true });
-  });
+    const fileData = await ghRes.json();
+    const content = Buffer.from(fileData.content, "base64").toString("utf8");
+
+    res.setHeader("Content-Type", "application/json");
+    res.send(content);
+
+  } catch (err) {
+    console.error("[GET events.json] Error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // ============================================================================
-//  SCOREBOARD STATE
+//  POST /save-events — Save events.json to GitHub
+// ============================================================================
+app.post("/save-events", async (req, res) => {
+  try {
+    const newContent = JSON.stringify(req.body, null, 2);
+
+    // STEP 1 — Get SHA of existing file
+    const getUrl = `${GH_API_BASE}/repos/${GH_REPO}/contents/${GH_FILEPATH}`;
+
+    const getRes = await fetch(getUrl, {
+      headers: {
+        "Authorization": `Bearer ${GH_TOKEN}`,
+        "Accept": "application/vnd.github+json"
+      }
+    });
+
+    if (!getRes.ok) {
+      console.log("[save-events] SHA lookup failed:", await getRes.text());
+      return res.status(500).json({ ok: false, error: "GitHub SHA fetch failed" });
+    }
+
+    const data = await getRes.json();
+    const sha = data.sha;
+
+    // STEP 2 — Update file
+    const updateRes = await fetch(getUrl, {
+      method: "PUT",
+      headers: {
+        "Authorization": `Bearer ${GH_TOKEN}`,
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        message: "Updated events.json via Matside Admin",
+        content: Buffer.from(newContent).toString("base64"),
+        sha: sha
+      })
+    });
+
+    if (!updateRes.ok) {
+      console.log("[save-events] GitHub write failed:", await updateRes.text());
+      return res.status(500).json({ ok: false, error: "GitHub write failed" });
+    }
+
+    console.log("[save-events] events.json updated successfully!");
+    res.json({ ok: true });
+
+  } catch (err) {
+    console.error("[save-events] Error:", err);
+    res.status(500).json({ ok: false, error: err.toString() });
+  }
+});
+
+// ============================================================================
+//  SCOREBOARD STATE (unchanged)
 // ============================================================================
 let state = {
   mats: {
@@ -129,60 +140,29 @@ let state = {
 };
 
 // ============================================================================
-//  SOCKET.IO EVENT HANDLERS
+//  SOCKET.IO — Real-time score updates
 // ============================================================================
+const io = socketio(server, {
+  cors: { origin: "*" }
+});
+
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
-
   socket.emit("stateUpdate", state);
 
-  socket.on("timerStart", ({ mat }) => {
-    if (state.mats[mat]) {
-      state.mats[mat].running = true;
-      io.emit("stateUpdate", state);
-    }
-  });
-
-  socket.on("timerStop", ({ mat }) => {
-    if (state.mats[mat]) {
-      state.mats[mat].running = false;
-      io.emit("stateUpdate", state);
-    }
-  });
-
-  socket.on("timerReset", ({ mat }) => {
-    if (state.mats[mat]) {
-      state.mats[mat].time = 0;
-      io.emit("stateUpdate", state);
-    }
+  socket.on("updateState", ({ mat, updates }) => {
+    Object.assign(state.mats[mat], updates);
+    io.emit("stateUpdate", state);
   });
 
   socket.on("addPoints", ({ mat, color, pts }) => {
-    if (state.mats[mat]) {
-      state.mats[mat][color] += pts;
-      io.emit("stateUpdate", state);
-    }
+    state.mats[mat][color] += pts;
+    io.emit("stateUpdate", state);
   });
 
   socket.on("subPoint", ({ mat, color }) => {
-    if (state.mats[mat]) {
-      state.mats[mat][color] = Math.max(0, state.mats[mat][color] - 1);
-      io.emit("stateUpdate", state);
-    }
-  });
-
-  socket.on("updateState", ({ mat, updates }) => {
-    if (state.mats[mat]) {
-      Object.assign(state.mats[mat], updates);
-      io.emit("stateUpdate", state);
-    }
-  });
-
-  socket.on("setPeriodLength", ({ mat, seconds }) => {
-    if (state.mats[mat]) {
-      state.mats[mat].periodLength = seconds;
-      io.emit("stateUpdate", state);
-    }
+    state.mats[mat][color] = Math.max(0, state.mats[mat][color] - 1);
+    io.emit("stateUpdate", state);
   });
 
   socket.on("disconnect", () => {
@@ -194,12 +174,9 @@ io.on("connection", (socket) => {
 //  TIMER LOOP
 // ============================================================================
 setInterval(() => {
-  Object.values(state.mats).forEach((m) => {
-    if (m.running) {
-      m.time++;
-    }
+  Object.values(state.mats).forEach(m => {
+    if (m.running) m.time++;
   });
-
   io.emit("stateUpdate", state);
 }, 1000);
 
