@@ -1,17 +1,43 @@
-// server.js — updated for Matside Multi-Event Architecture
-// Supports:
-//  • Socket.IO scoreboard sync
-//  • Saving events.json to persistent storage
-//  • Serving events.json to all front-end pages
+// ============================================================================
+//  Matside Scoreboard Server
+//  Updated with:
+//    ✔ Full CORS support (GET/POST + preflight)
+//    ✔ Persistent event storage (/var/data/events.json)
+//    ✔ Safe fallbacks for first-run initialization
+//    ✔ Socket.IO real-time sync
+//    ✔ Clean Express routing
+// ============================================================================
 
 const express = require("express");
 const http = require("http");
 const socketio = require("socket.io");
 const fs = require("fs");
 const path = require("path");
+const cors = require("cors");
 
 const app = express();
 const server = http.createServer(app);
+
+// ============================================================================
+//  CORS CONFIG (Fixes your GitHub Pages → Render requests)
+// ============================================================================
+app.use(cors({
+  origin: [
+    "https://matsidewrestlingco-netizen.github.io",
+    "https://www.matside.org",
+    "http://localhost:3000",
+    "http://localhost:5500"
+  ],
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"]
+}));
+
+// Preflight support
+app.options("*", cors());
+
+// ============================================================================
+//  SOCKET.IO
+// ============================================================================
 const io = socketio(server, {
   cors: {
     origin: "*",
@@ -19,33 +45,32 @@ const io = socketio(server, {
   }
 });
 
-/* ------------------------------------------------------------------
-   CONSTANTS & PATHS
-------------------------------------------------------------------- */
+// ============================================================================
+//  PATHS
+// ============================================================================
 const PUBLIC_DIR = path.join(__dirname, "public");
 
-// Render persistent storage directory
-const PERSIST_EVENTS_PATH = "/var/data/events.json";
-
-// Fallback default events.json for FIRST RUN
+const PERSIST_EVENTS_PATH = "/var/data/events.json";          // Render persistent disk
 const DEFAULT_EVENTS_PATH = path.join(PUBLIC_DIR, "events.json");
 
-/* ------------------------------------------------------------------
-   INIT EVENTS STORAGE (once at startup)
-   If /var/data/events.json does not exist, copy the default.
-------------------------------------------------------------------- */
+// ============================================================================
+//  INITIALIZE EVENTS (first-time setup)
+// ============================================================================
 (function initializeEvents() {
   try {
     if (!fs.existsSync(PERSIST_EVENTS_PATH)) {
-      console.log("[Events] No persistent events.json found, creating...");
+      console.log("[Events] No persistent events.json found. Creating one.");
 
       let defaultEvents = { events: [] };
+
+      // If a default exists in /public, use that
       if (fs.existsSync(DEFAULT_EVENTS_PATH)) {
         defaultEvents = JSON.parse(fs.readFileSync(DEFAULT_EVENTS_PATH, "utf8"));
       }
 
       fs.writeFileSync(PERSIST_EVENTS_PATH, JSON.stringify(defaultEvents, null, 2));
-      console.log("[Events] Created /var/data/events.json successfully.");
+
+      console.log("[Events] /var/data/events.json created successfully.");
     } else {
       console.log("[Events] Persistent events.json found.");
     }
@@ -54,29 +79,25 @@ const DEFAULT_EVENTS_PATH = path.join(PUBLIC_DIR, "events.json");
   }
 })();
 
-/* ------------------------------------------------------------------
-   EXPRESS — MIDDLEWARE + STATIC FILES
-------------------------------------------------------------------- */
+// ============================================================================
+//  EXPRESS MIDDLEWARE & STATIC FILES
+// ============================================================================
 app.use(express.json());
 app.use(express.static(PUBLIC_DIR));
 
-/* ------------------------------------------------------------------
-   ROUTE: GET /events.json
-   Always serve the persistent version first.
-------------------------------------------------------------------- */
+// ============================================================================
+//  ROUTE: GET /events.json
+// ============================================================================
 app.get("/events.json", (req, res) => {
   if (fs.existsSync(PERSIST_EVENTS_PATH)) {
     return res.sendFile(PERSIST_EVENTS_PATH);
   }
-
-  // Fallback — rarely used
   return res.sendFile(DEFAULT_EVENTS_PATH);
 });
 
-/* ------------------------------------------------------------------
-   ROUTE: POST /save-events
-   Save events.json to persistent Render storage (/var/data/)
-------------------------------------------------------------------- */
+// ============================================================================
+//  ROUTE: POST /save-events
+// ============================================================================
 app.post("/save-events", (req, res) => {
   const eventsData = req.body;
 
@@ -95,9 +116,9 @@ app.post("/save-events", (req, res) => {
   });
 });
 
-/* ------------------------------------------------------------------
-   SCOREBOARD SYSTEM — SOCKET.IO
-------------------------------------------------------------------- */
+// ============================================================================
+//  SCOREBOARD STATE
+// ============================================================================
 let state = {
   mats: {
     1: { time: 0, running: false, red: 0, green: 0, period: 1, winner: null },
@@ -107,13 +128,14 @@ let state = {
   }
 };
 
+// ============================================================================
+//  SOCKET.IO EVENT HANDLERS
+// ============================================================================
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
-  // Send current state immediately
   socket.emit("stateUpdate", state);
 
-  // Timer control
   socket.on("timerStart", ({ mat }) => {
     if (state.mats[mat]) {
       state.mats[mat].running = true;
@@ -135,7 +157,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Scoring
   socket.on("addPoints", ({ mat, color, pts }) => {
     if (state.mats[mat]) {
       state.mats[mat][color] += pts;
@@ -150,9 +171,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Names, period, winner, etc.
-  socket.on("updateState", (data) => {
-    const { mat, updates } = data;
+  socket.on("updateState", ({ mat, updates }) => {
     if (state.mats[mat]) {
       Object.assign(state.mats[mat], updates);
       io.emit("stateUpdate", state);
@@ -171,21 +190,22 @@ io.on("connection", (socket) => {
   });
 });
 
-/* ------------------------------------------------------------------
-   TIMER LOOP — every 1 second
-------------------------------------------------------------------- */
+// ============================================================================
+//  TIMER LOOP
+// ============================================================================
 setInterval(() => {
   Object.values(state.mats).forEach((m) => {
     if (m.running) {
       m.time++;
     }
   });
+
   io.emit("stateUpdate", state);
 }, 1000);
 
-/* ------------------------------------------------------------------
-   START SERVER
-------------------------------------------------------------------- */
+// ============================================================================
+//  START SERVER
+// ============================================================================
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Matside server running on port ${PORT}`);
