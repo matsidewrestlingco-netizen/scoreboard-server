@@ -1,5 +1,5 @@
 {
-  "name": "scoreboard-server",
+  "name": "matside-server",
   "version": "3.0.0",
   "main": "server.js",
   "type": "commonjs",
@@ -10,6 +10,6 @@
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "socket.io": "^4.7.2",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.4.5"
   }
 }
