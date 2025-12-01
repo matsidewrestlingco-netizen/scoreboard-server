@@ -1,13 +1,10 @@
 /**
- * Matside Scoreboard Server v3.0
- * -------------------------------------------
- * - Multi-mat scoreboard sync (4 mats)
- * - GitHub-backed events.json + match-results.json
- * - Socket.io real-time updates
- * - Device monitoring (registerDevice, heartbeat, clientDiagnostics)
- * - /device-status API for hub.html
- *
- * NOTE: Node 18+ has global fetch, so no node-fetch required.
+ * Matside Scoreboard Server v2.20
+ * -----------------------------------------------
+ * + Fully supports segmentId (REG1 → OT → TB1 → TB2 → UT)
+ * + Compatible with new modular control panel
+ * + Keeps all existing features (multi-mat, GitHub syncing, events, results)
+ * + No node-fetch required (uses global fetch)
  */
 
 const express = require("express");
@@ -34,65 +31,45 @@ app.use(cors());
 app.use(express.json({ limit: "3mb" }));
 
 // -----------------------------------------------------
-// In-memory data
+// MONITORING (in-memory only)
 // -----------------------------------------------------
-let eventsData = [];
-let matchResults = [];
-
-// Device + monitor data (in-memory only)
-const devices = {}; // devices[socket.id] = { type, mat, lastHeartbeat, online }
-
 const monitor = {
   heartbeats: {
-    control: {},   // mat -> { ts, clientTs }
-    scoreboard: {} // mat -> { ts, clientTs }
+    control: {},
+    scoreboard: {}
   },
   diagnostics: {
-    control: {},   // mat -> { fps, uptime, reconnects, usedHeap, ts }
-    scoreboard: {} // mat -> { fps, uptime, reconnects, usedHeap, ts }
+    control: {},
+    scoreboard: {}
   }
-};
-
-// Multi-mat scoreboard state
-const mats = {
-  1: { period: 1, time: 60, running: false, red: 0, green: 0 },
-  2: { period: 1, time: 60, running: false, red: 0, green: 0 },
-  3: { period: 1, time: 60, running: false, red: 0, green: 0 },
-  4: { period: 1, time: 60, running: false, red: 0, green: 0 }
 };
 
 // -----------------------------------------------------
 // GitHub Helpers
 // -----------------------------------------------------
 async function pushToGitHub(path, jsonData, commitMsg) {
-  if (!GITHUB_TOKEN) {
-    console.error("[GitHub] No GITHUB_TOKEN set");
-    return { ok: false, error: "No GITHUB_TOKEN" };
-  }
-
   try {
-    // 1) Get existing file metadata (for sha)
+    // 1. Check if file exists
     let sha = null;
-    const metaRes = await fetch(GITHUB_API_URL + path, {
+
+    const meta = await fetch(GITHUB_API_URL + path, {
       headers: {
         Authorization: `Bearer ${GITHUB_TOKEN}`,
         Accept: "application/vnd.github+json"
       }
     });
 
-    if (metaRes.ok) {
-      const info = await metaRes.json();
+    if (meta.ok) {
+      const info = await meta.json();
       sha = info.sha;
-    } else {
-      const metaText = await metaRes.text();
-      console.warn("[GitHub META] status:", metaRes.status, "body:", metaText);
-      // It's OK if file doesn't exist yet (404) – we'll create it.
     }
 
-    const content = Buffer.from(JSON.stringify(jsonData, null, 2)).toString("base64");
+    const content = Buffer.from(
+      JSON.stringify(jsonData, null, 2)
+    ).toString("base64");
 
-    // 2) PUT new content
-    const pushRes = await fetch(GITHUB_API_URL + path, {
+    // 2. Push update
+    const res = await fetch(GITHUB_API_URL + path, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${GITHUB_TOKEN}`,
@@ -105,33 +82,20 @@ async function pushToGitHub(path, jsonData, commitMsg) {
       })
     });
 
-    const pushBodyText = await pushRes.text();
-    let pushBody = null;
-    try { pushBody = JSON.parse(pushBodyText); } catch (_) {}
-
-    if (!pushRes.ok) {
-      console.error("[GitHub PUSH FAILED] status:", pushRes.status, "body:", pushBodyText);
-      return {
-        ok: false,
-        status: pushRes.status,
-        body: pushBodyText
-      };
+    if (!res.ok) {
+      const txt = await res.text();
+      console.error("[GitHub Push Failed]", txt);
+      return false;
     }
 
-    console.log("[GitHub PUSH OK] status:", pushRes.status, "commit:", pushBody && pushBody.commit && pushBody.commit.sha);
-    return { ok: true };
+    return true;
   } catch (err) {
     console.error("[GitHub Push Exception]", err);
-    return { ok: false, error: err.message };
+    return false;
   }
 }
 
 async function loadFromGitHub(path) {
-  if (!GITHUB_TOKEN) {
-    console.error("[GitHub] No GITHUB_TOKEN set, cannot load", path);
-    return null;
-  }
-
   try {
     const res = await fetch(GITHUB_API_URL + path, {
       headers: {
@@ -140,10 +104,7 @@ async function loadFromGitHub(path) {
       }
     });
 
-    if (!res.ok) {
-      console.warn("[GitHub Load] Non-OK", path, res.status);
-      return null;
-    }
+    if (!res.ok) return null;
 
     const file = await res.json();
     return JSON.parse(Buffer.from(file.content, "base64").toString("utf8"));
@@ -154,81 +115,69 @@ async function loadFromGitHub(path) {
 }
 
 // -----------------------------------------------------
-// Load Events + Match Results on Boot
+// Load events + results on server start
 // -----------------------------------------------------
+let eventsData = [];
+let matchResults = [];
+
 (async () => {
-  try {
-    const e = await loadFromGitHub(EVENTS_PATH);
-    if (Array.isArray(e)) eventsData = e;
-  } catch (_) {}
+  const e = await loadFromGitHub(EVENTS_PATH);
+  if (e) eventsData = e;
 
-  try {
-    const m = await loadFromGitHub(RESULTS_PATH);
-    if (Array.isArray(m)) matchResults = m;
-  } catch (_) {}
+  const m = await loadFromGitHub(RESULTS_PATH);
+  if (m) matchResults = m;
 
-  console.log("[Startup] Loaded events:", eventsData.length);
-  console.log("[Startup] Loaded match results:", matchResults.length);
+  console.log("[Startup] Loaded Events:", eventsData.length);
+  console.log("[Startup] Loaded Match Results:", matchResults.length);
 })();
 
 // -----------------------------------------------------
-// REST API Routes
+// REST API Endpoints
 // -----------------------------------------------------
+app.get("/events.json", (req, res) => res.json(eventsData));
+
 app.post("/save-events", async (req, res) => {
   eventsData = req.body.events || [];
 
-  const result = await pushToGitHub(EVENTS_PATH, eventsData, "Update events.json");
-
-  if (!result.ok) {
-    console.error("[/save-events] GitHub write failed:", result);
-    return res.status(500).json({
-      error: "GitHub write failed",
-      detail: result
-    });
-  }
-
-  return res.json({ success: true });
+  const ok = await pushToGitHub(EVENTS_PATH, eventsData, "Update events.json");
+  res.json(ok ? { success: true } : { error: "GitHub write failed" });
 });
-app.get("/match-results", (req, res) => {
-  res.json(matchResults);
-});
+
+app.get("/match-results", (req, res) => res.json(matchResults));
 
 app.post("/save-match-result", async (req, res) => {
   const entry = req.body;
   matchResults.push(entry);
 
   const ok = await pushToGitHub(RESULTS_PATH, matchResults, "Add match result");
-  if (!ok) return res.status(500).json({ error: "GitHub write failed" });
-
-  return res.json({ success: true });
-});
-
-// Device status API for hub.html (Option B: monitor via API, not in stateUpdate)
-app.get("/device-status", (req, res) => {
-  const list = Object.entries(devices).map(([id, d]) => ({
-    id,
-    type: d.type,
-    mat: d.mat,
-    online: !!d.online,
-    lastSeen: d.lastHeartbeat
-  }));
-
-  res.json({
-    devices: list,
-    monitor
-  });
+  res.json(ok ? { success: true } : { error: "GitHub write failed" });
 });
 
 // -----------------------------------------------------
-// HTTP Server + Socket.io
+// Multi-Mat Scoreboard State
 // -----------------------------------------------------
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" }
-});
+/**
+ * NEW: server now tracks `segmentId` instead of `period`
+ */
+function newMatState() {
+  return {
+    segmentId: "REG1",
+    time: 60,
+    running: false,
+    red: 0,
+    green: 0
+  };
+}
+
+const mats = {
+  1: newMatState(),
+  2: newMatState(),
+  3: newMatState(),
+  4: newMatState()
+};
 
 // -----------------------------------------------------
-// Timer Loop — Updates Every 1 Second
+// Timer Loop (every 1s)
 // -----------------------------------------------------
 function tickTimers() {
   for (const mat of [1, 2, 3, 4]) {
@@ -240,157 +189,95 @@ function tickTimers() {
       if (m.time <= 0) {
         m.time = 0;
         m.running = false;
-        // Any period/OT logic can stay on the client for now
       }
     }
   }
 
-  // IMPORTANT: per your option B, we only send mats here (no monitor)
-  io.emit("stateUpdate", { mats });
+  // push updates + monitoring data
+  io.emit("stateUpdate", {
+    mats,
+    monitor
+  });
 }
 
 setInterval(tickTimers, 1000);
 
 // -----------------------------------------------------
-// Broadcast device status to all listeners
+// SOCKET.IO
 // -----------------------------------------------------
-function broadcastDeviceStatus() {
-  const list = Object.entries(devices).map(([id, d]) => ({
-    id,
-    type: d.type,
-    mat: d.mat,
-    online: !!d.online,
-    lastSeen: d.lastHeartbeat
-  }));
+const serverHTTP = http.createServer(app);
+const io = new Server(serverHTTP, { cors: { origin: "*" } });
 
-  io.emit("deviceStatusUpdate", list);
-}
+io.on("connection", socket => {
+  console.log("[Socket] Client connected");
 
-// Clean up stale devices (no heartbeat > 15s)
-setInterval(() => {
-  const now = Date.now();
-  let changed = false;
+  // Send full state immediately
+  socket.emit("stateUpdate", {
+    mats,
+    monitor
+  });
 
-  for (const [id, dev] of Object.entries(devices)) {
-    if (dev.online && now - dev.lastHeartbeat > 15000) {
-      dev.online = false;
-      changed = true;
-    }
-  }
+  // Update part of a mat state
+  socket.on("updateState", ({ mat, updates }) => {
+    if (!mats[mat]) return;
 
-  if (changed) broadcastDeviceStatus();
-}, 5000);
+    Object.assign(mats[mat], updates);
 
-// -----------------------------------------------------
-// Socket.io Connections
-// -----------------------------------------------------
-io.on("connection", (socket) => {
-  console.log("[Socket] Connected:", socket.id);
+    io.emit("stateUpdate", {
+      mats,
+      monitor
+    });
+  });
 
-  // Immediately send current mats state
-  socket.emit("stateUpdate", { mats });
+  // Add scoring
+  socket.on("addPoints", ({ mat, color, pts }) => {
+    if (!mats[mat]) return;
+    mats[mat][color] += pts;
 
-  // ---------- Device Registration ----------
-  socket.on("registerDevice", ({ type, mat }) => {
-    devices[socket.id] = {
-      type: type || "unknown",
-      mat: mat || null,
-      lastHeartbeat: Date.now(),
-      online: true
+    io.emit("stateUpdate", {
+      mats,
+      monitor
+    });
+  });
+
+  // Subtract scoring
+  socket.on("subPoint", ({ mat, color }) => {
+    if (!mats[mat]) return;
+    mats[mat][color] = Math.max(0, mats[mat][color] - 1);
+
+    io.emit("stateUpdate", {
+      mats,
+      monitor
+    });
+  });
+
+  // End match → write to results.json
+  socket.on("matchEnded", async (data) => {
+    matchResults.push(data);
+    await pushToGitHub(RESULTS_PATH, matchResults, "Add match result");
+
+    io.emit("stateUpdate", {
+      mats,
+      monitor
+    });
+  });
+
+  // Heartbeats for admin monitoring
+  socket.on("heartbeat", ({ type, mat, ts }) => {
+    if (!monitor.heartbeats[type]) monitor.heartbeats[type] = {};
+    monitor.heartbeats[type][mat] = {
+      ts: Date.now(),
+      clientTs: ts
     };
-    console.log(`[Device] Registered ${socket.id} as ${type || "unknown"} (mat ${mat || "-"})`);
-    broadcastDeviceStatus();
   });
 
-  // ---------- Heartbeat ----------
-  socket.on("heartbeat", (payload = {}) => {
-    const now = Date.now();
-    const dev = devices[socket.id];
-    if (dev) {
-      dev.lastHeartbeat = now;
-      dev.online = true;
-    }
-
-    const { type, mat, ts } = payload;
-    if (type && mat != null) {
-      if (!monitor.heartbeats[type]) monitor.heartbeats[type] = {};
-      monitor.heartbeats[type][mat] = {
-        ts: now,
-        clientTs: ts || null
-      };
-    }
-
-    broadcastDeviceStatus();
-  });
-
-  // ---------- Client Diagnostics ----------
-  socket.on("clientDiagnostics", (payload = {}) => {
-    const { type, mat, ...rest } = payload;
-    if (!type || mat == null) return;
-
+  // Diagnostics (FPS, memory, reconnects, etc.)
+  socket.on("clientDiagnostics", ({ type, mat, ...rest }) => {
     if (!monitor.diagnostics[type]) monitor.diagnostics[type] = {};
     monitor.diagnostics[type][mat] = {
       ...rest,
       ts: Date.now()
     };
-  });
-
-  // ---------- Scoreboard / Control Operations ----------
-  socket.on("updateState", ({ mat, updates }) => {
-    if (!mats[mat]) return;
-    Object.assign(mats[mat], updates || {});
-    io.emit("stateUpdate", { mats });
-  });
-
-  socket.on("addPoints", ({ mat, color, pts }) => {
-    if (!mats[mat] || (color !== "red" && color !== "green")) return;
-    mats[mat][color] += Number(pts) || 0;
-    io.emit("stateUpdate", { mats });
-  });
-
-  socket.on("subPoint", ({ mat, color }) => {
-    if (!mats[mat] || (color !== "red" && color !== "green")) return;
-    mats[mat][color] = Math.max(0, mats[mat][color] - 1);
-    io.emit("stateUpdate", { mats });
-  });
-
-  socket.on("resetMat", ({ mat }) => {
-    if (!mats[mat]) return;
-    mats[mat] = { period: 1, time: 60, running: false, red: 0, green: 0 };
-    io.emit("stateUpdate", { mats });
-  });
-
-  // ---------- Match Ended ----------
-  socket.on("matchEnded", async (data) => {
-    console.log("[Match Ended]", data);
-    matchResults.push(data);
-    await pushToGitHub(RESULTS_PATH, matchResults, "Add match result");
-    io.emit("stateUpdate", { mats });
-  });
-
-  // ---------- Admin Hooks (optional, currently no-op on server) ----------
-  socket.on("adminResetMat", ({ mat }) => {
-    if (!mats[mat]) return;
-    mats[mat] = { period: 1, time: 60, running: false, red: 0, green: 0 };
-    io.emit("stateUpdate", { mats });
-  });
-
-  socket.on("adminClearTimeline", ({ mat }) => {
-    // If you later store timeline server-side, clear it here.
-    // Right now, timeline is client-side only.
-  });
-
-  socket.on("adminNotifyReload", ({ type, mat }) => {
-    // Optionally broadcast a message that certain clients listen for
-    // e.g. socket.emit("reloadRequested", { type, mat });
-  });
-
-  socket.on("disconnect", () => {
-    console.log("[Socket] Disconnected:", socket.id);
-    if (devices[socket.id]) {
-      devices[socket.id].online = false;
-      broadcastDeviceStatus();
-    }
   });
 });
 
@@ -398,6 +285,6 @@ io.on("connection", (socket) => {
 // Start Server
 // -----------------------------------------------------
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log("Matside Server running on port", PORT);
-});
+serverHTTP.listen(PORT, () =>
+  console.log("Matside Server running on port", PORT)
+);
