@@ -7,6 +7,8 @@
  * + No node-fetch required (uses global fetch)
  */
 
+let currentSkin = "blackGlass"; // default skin
+
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -249,6 +251,16 @@ io.on("connection", socket => {
       mats,
       monitor
     });
+  // Immediately send current skin to new client
+  socket.emit("themeUpdate", currentSkin);
+
+  // Only the hub should send themeUpdate, but we don't enforce that here
+  socket.on("themeUpdate", (skinName) => {
+    if (typeof skinName !== "string") return;
+    currentSkin = skinName;
+    io.emit("themeUpdate", currentSkin);
+  });
+    
   });
 
   // End match → write to results.json
