@@ -1,4 +1,4 @@
-**
+/**
  * Matside Scoreboard Server v2.11 (Improved Edition)
  * --------------------------------------------------
  * - No node-fetch required (uses built-in fetch)
@@ -32,19 +32,6 @@ const RESULTS_PATH = "public/match-results.json";
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "3mb" }));
-
-// Monitor data (in-memory only)
-const monitor = {
-  heartbeats: {
-    control: {},   // mat -> { ts, clientTs }
-    scoreboard: {} // mat -> { ts, clientTs }
-  },
-  diagnostics: {
-    control: {},   // mat -> { fps, uptime, reconnects, usedHeap, ts }
-    scoreboard: {} // mat -> { ... , ts }
-  }
-};
-
 
 // -----------------------------------------------------
 // Helper: Push a JSON file to GitHub
@@ -192,7 +179,6 @@ function tickTimers() {
       }
     }
   }
-	state.monitor = monitor;
   io.emit("stateUpdate", { mats });
 }
 
@@ -211,45 +197,16 @@ io.on("connection", socket => {
 
   socket.on("updateState", ({ mat, updates }) => {
     Object.assign(mats[mat], updates);
-state.monitor = monitor;
     io.emit("stateUpdate", { mats });
   });
 
-io.on("connection", (socket) => {
-  // ... your existing handlers ...
-
-  socket.on("heartbeat", (payload = {}) => {
-    const { type, mat, ts } = payload;
-    if (!type || !mat) return;
-    if (!monitor.heartbeats[type]) monitor.heartbeats[type] = {};
-    monitor.heartbeats[type][mat] = {
-      ts: Date.now(),
-      clientTs: ts || null
-    };
-  });
-
-  socket.on("clientDiagnostics", (payload = {}) => {
-    const { type, mat, ...rest } = payload;
-    if (!type || !mat) return;
-    if (!monitor.diagnostics[type]) monitor.diagnostics[type] = {};
-    monitor.diagnostics[type][mat] = {
-      ...rest,
-      ts: Date.now()
-    };
-  });
-
-  // ... keep your existing code here ...
-});
-
   socket.on("addPoints", ({ mat, color, pts }) => {
     mats[mat][color] += pts;
-state.monitor = monitor;
     io.emit("stateUpdate", { mats });
   });
 
   socket.on("subPoint", ({ mat, color }) => {
     mats[mat][color] = Math.max(0, mats[mat][color] - 1);
-state.monitor = monitor;
     io.emit("stateUpdate", { mats });
   });
 
@@ -259,7 +216,6 @@ state.monitor = monitor;
     matchResults.push(data);
     await pushToGitHub(RESULTS_PATH, matchResults, "Add match result");
 
-state.monitor = monitor;
     io.emit("stateUpdate", { mats });
   });
 });
