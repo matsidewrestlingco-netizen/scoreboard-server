@@ -66,12 +66,12 @@ const mats = {
 // -----------------------------------------------------
 async function pushToGitHub(path, jsonData, commitMsg) {
   if (!GITHUB_TOKEN) {
-    console.error("[GitHub] No GITHUB_TOKEN set, skipping push");
-    return false;
+    console.error("[GitHub] No GITHUB_TOKEN set");
+    return { ok: false, error: "No GITHUB_TOKEN" };
   }
 
   try {
-    // Fetch existing file (to get sha)
+    // 1) Get existing file metadata (for sha)
     let sha = null;
     const metaRes = await fetch(GITHUB_API_URL + path, {
       headers: {
@@ -83,11 +83,16 @@ async function pushToGitHub(path, jsonData, commitMsg) {
     if (metaRes.ok) {
       const info = await metaRes.json();
       sha = info.sha;
+    } else {
+      const metaText = await metaRes.text();
+      console.warn("[GitHub META] status:", metaRes.status, "body:", metaText);
+      // It's OK if file doesn't exist yet (404) – we'll create it.
     }
 
     const content = Buffer.from(JSON.stringify(jsonData, null, 2)).toString("base64");
 
-    const putRes = await fetch(GITHUB_API_URL + path, {
+    // 2) PUT new content
+    const pushRes = await fetch(GITHUB_API_URL + path, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${GITHUB_TOKEN}`,
@@ -100,16 +105,24 @@ async function pushToGitHub(path, jsonData, commitMsg) {
       })
     });
 
-    if (!putRes.ok) {
-      const txt = await putRes.text();
-      console.error("[GitHub Push Failed]", putRes.status, txt);
-      return false;
+    const pushBodyText = await pushRes.text();
+    let pushBody = null;
+    try { pushBody = JSON.parse(pushBodyText); } catch (_) {}
+
+    if (!pushRes.ok) {
+      console.error("[GitHub PUSH FAILED] status:", pushRes.status, "body:", pushBodyText);
+      return {
+        ok: false,
+        status: pushRes.status,
+        body: pushBodyText
+      };
     }
 
-    return true;
+    console.log("[GitHub PUSH OK] status:", pushRes.status, "commit:", pushBody && pushBody.commit && pushBody.commit.sha);
+    return { ok: true };
   } catch (err) {
     console.error("[GitHub Push Exception]", err);
-    return false;
+    return { ok: false, error: err.message };
   }
 }
 
@@ -161,19 +174,21 @@ async function loadFromGitHub(path) {
 // -----------------------------------------------------
 // REST API Routes
 // -----------------------------------------------------
-app.get("/events.json", (req, res) => {
-  res.json(eventsData);
-});
-
 app.post("/save-events", async (req, res) => {
   eventsData = req.body.events || [];
 
-  const ok = await pushToGitHub(EVENTS_PATH, eventsData, "Update events.json");
-  if (!ok) return res.status(500).json({ error: "GitHub write failed" });
+  const result = await pushToGitHub(EVENTS_PATH, eventsData, "Update events.json");
+
+  if (!result.ok) {
+    console.error("[/save-events] GitHub write failed:", result);
+    return res.status(500).json({
+      error: "GitHub write failed",
+      detail: result
+    });
+  }
 
   return res.json({ success: true });
 });
-
 app.get("/match-results", (req, res) => {
   res.json(matchResults);
 });
